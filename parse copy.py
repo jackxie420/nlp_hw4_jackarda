@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections import Counter
 from typing import Counter as CounterType, Iterable, List, Optional, Dict, Tuple
+import heapq
 
 log = logging.getLogger(Path(__file__).stem)  # For usage, see findsim.py in earlier assignment.
 
@@ -71,15 +72,6 @@ class EarleyChart:
         self.cols: List[Agenda]
         self._run_earley()    # run Earley's algorithm to construct self.cols
 
-    def __repr__(self):
-        chart = []
-        for col in self.cols:
-            line = []
-            for entry in col.all():
-                line.append( entry.__repr__() )
-            chart.append(line)
-            print(line)
-
     def accepted(self) -> bool:
         """Was the sentence accepted?
         That is, does the finished chart contain an item corresponding to a parse of the sentence?
@@ -129,7 +121,7 @@ class EarleyChart:
     def _predict(self, nonterminal: str, position: int) -> None:
         """Start looking for this nonterminal at the given position."""
         for rule in self.grammar.expansions(nonterminal):
-            new_item = Item(rule, dot_position=0, start_position=position)
+            new_item = Item(rule, dot_position=0, start_position=position, weight = rule.weight)
             self.cols[position].push(new_item)
             log.debug(f"\tPredicted: {new_item} in column {position}")
             self.profile["PREDICT"] += 1
@@ -138,7 +130,7 @@ class EarleyChart:
         """Attach the next word to this item that ends at position, 
         if it matches what this item is looking for next."""
         if position < len(self.tokens) and self.tokens[position] == item.next_symbol():
-            new_item = item.with_dot_advanced()
+            new_item = item.with_dot_advanced(0)
             self.cols[position + 1].push(new_item)
             log.debug(f"\tScanned to get: {new_item} in column {position+1}")
             self.profile["SCAN"] += 1
@@ -151,7 +143,7 @@ class EarleyChart:
         mid = item.start_position   # start position of this item = end position of item to its left
         for customer in self.cols[mid].all():  # could you eliminate this inefficient linear search?
             if customer.next_symbol() == item.rule.lhs:
-                new_item = customer.with_dot_advanced()
+                new_item = customer.with_dot_advanced(item.weight)#this is a weight added to the current dot
                 self.cols[position].push(new_item)
                 log.debug(f"\tAttached to get: {new_item} in column {position}")
                 self.profile["ATTACH"] += 1
@@ -202,9 +194,8 @@ class Agenda:
     """
 
     def __init__(self) -> None:
-        self._items: List[Item] = []       # list of all items that were *ever* pushed
-        self._index: Dict[Item, int] = {}  # stores index of an item if it was ever pushed
-        self._next = 0                     # index of first item that has not yet been popped
+        self._items = {}    # dictionary of current items in the agenda
+        self._pushed_items = {}   #list of all items ever pushed   
 
         # Note: There are other possible designs.  For example, self._index doesn't really
         # have to store the index; it could be changed from a dictionary to a set.  
@@ -216,21 +207,25 @@ class Agenda:
     def __len__(self) -> int:
         """Returns number of items that are still waiting to be popped.
         Enables `len(my_agenda)`."""
-        return len(self._items) - self._next
+        return len(self._items)
 
     def push(self, item: Item) -> None:
         """Add (enqueue) the item, unless it was previously added."""
-        if item not in self._index:    # O(1) lookup in hash table
-            self._items.append(item)
-            self._index[item] = len(self._items) - 1
+        if item.identifier not in self._pushed_items.keys():    # O(1) lookup in hash table
+            self._items[item.identifier] = item
+            self._pushed_items[item.identifier] = item
+        else:
+            existing_item = self._pushed_items[item.identifier]
+            if item.weight < existing_item.weight:
+                self._pushed_items[item.identifier] = item
+                self.items[item.identifier] = item
             
     def pop(self) -> Item:
         """Returns one of the items that was waiting to be popped (dequeued).
         Raises IndexError if there are no items waiting."""
         if len(self)==0:
             raise IndexError
-        item = self._items[self._next]
-        self._next += 1
+        item = self._items.pop()
         return item
 
     def all(self) -> Iterable[Item]:
@@ -240,8 +235,7 @@ class Agenda:
 
     def __repr__(self):
         """Provide a human-readable string REPResentation of this Agenda."""
-        next = self._next
-        return f"{self.__class__.__name__}({self._items[:next]}; {self._items[next:]})"
+        return f"{self.__class__.__name__}({self._items}; {self._pushed_items})"
 
 class Grammar:
     """Represents a weighted context-free grammar."""
@@ -305,14 +299,17 @@ class Rule:
     """
     lhs: str
     rhs: Tuple[str, ...]
-    weight: float = 0.0
+    weight: float #need to get the weight of a rule,
 
     def __repr__(self) -> str:
         """Complete string used to show this rule instance at the command line"""
         # Note: You might want to modify this to include the weight.
-        return f"{self.lhs} → {' '.join(self.rhs)}"
+        return f"{self.weight} {self.lhs} → {' '.join(self.rhs)}"
 
     
+class TableEntry:
+    self.Item
+
 # We particularly want items to be immutable, since they will be hashed and 
 # used as keys in a dictionary (for duplicate detection).  
 @dataclass(frozen=True)
@@ -322,9 +319,18 @@ class Item:
     rule: Rule
     dot_position: int
     start_position: int
+    weight: float #this is the weight of the item as an entry in the early chart
     # We don't store the end_position, which corresponds to the column
     # that the item is in, although you could store it redundantly for 
     # debugging purposes if you wanted.
+    identifier: str  #this is a string in the form of 
+
+    def __init__(self, rule, dot_position, start_position, weight):
+        self.rule = rule
+        self.dot_position = dot_position
+        self.start_position = start_position
+        self.weight = weight
+        self.identifier = self.__repr__()
 
     def next_symbol(self) -> Optional[str]:
         """What's the next, unprocessed symbol (terminal, non-terminal, or None) in this partially matched rule?"""
@@ -334,10 +340,10 @@ class Item:
         else:
             return self.rule.rhs[self.dot_position]
 
-    def with_dot_advanced(self) -> Item:
+    def with_dot_advanced(self, added_weight) -> Item:
         if self.next_symbol() is None:
             raise IndexError("Can't advance the dot past the end of the rule")
-        return Item(rule=self.rule, dot_position=self.dot_position + 1, start_position=self.start_position)
+        return Item(rule=self.rule, dot_position=self.dot_position + 1, start_position=self.start_position, weight=self.weight+added_weight)
 
     def __repr__(self) -> str:
         """Human-readable representation string used when printing this item."""

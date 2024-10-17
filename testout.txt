@@ -1,0 +1,4 @@
+'3' is accepted by arith.gr
+'3 *' is rejected by arith.gr
+'3 * 5' is accepted by arith.gr
+'3 * 5 + 6 * { 5 - 3 - 2 } + sqrt { 7 }' is accepted by arith.gr

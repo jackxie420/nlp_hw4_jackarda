@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections import Counter
 from typing import Counter as CounterType, Iterable, List, Optional, Dict, Tuple
-import heapq
 
 log = logging.getLogger(Path(__file__).stem)  # For usage, see findsim.py in earlier assignment.
 
@@ -71,6 +70,18 @@ class EarleyChart:
 
         self.cols: List[Agenda]
         self._run_earley()    # run Earley's algorithm to construct self.cols
+        self.best_entry: TableEntry
+
+    def __repr__(self):
+        chart = []
+        for col in self.cols:
+            line = []
+            for entry in col.all():
+                line.append( entry.__repr__() )
+            chart.append(line)
+            print(line)
+        
+
 
     def accepted(self) -> bool:
         """Was the sentence accepted?
@@ -82,6 +93,28 @@ class EarleyChart:
                 and item.start_position == 0):               # and started back at position 0
                     return True
         return False   # we didn't find any appropriate item
+    
+    def __get_best_parse__(self) -> TableEntry:
+        min_weight = math.inf
+        best_entry = None
+        for item in self.cols[-1].all():    # the last column
+            if (item.rule.lhs == self.grammar.start_symbol   # a ROOT item in this column
+                and item.next_symbol() is None               # that is complete 
+                and item.start_position == 0):               # and started back at position 0
+                    if min_weight > item.weight:
+                        min_weight = item.weight
+                        best_entry = item
+        return best_entry
+    
+    def get_weight(self) -> int:
+        return self.best_entry.weight
+    
+    def get_parse(self) -> str:
+        entry = self.best_entry
+        while(entry != None):
+            print(entry.item)
+            entry = entry.back_pointer
+         
 
     def _run_earley(self) -> None:
         """Fill in the Earley chart."""
@@ -116,37 +149,36 @@ class EarleyChart:
                 else:
                     # Try to scan the terminal after the dot
                     log.debug(f"{item} => SCAN")
-                    self._scan(item, i)                      
+                    self._scan(item, i)             
+
+        self.best_entry = self.__get_best_parse__()         
 
     def _predict(self, nonterminal: str, position: int) -> None:
         """Start looking for this nonterminal at the given position."""
         for rule in self.grammar.expansions(nonterminal):
-            new_item = Item(rule, dot_position=0, start_position=position, weight = rule.weight)
+            new_item = TableEntry(item = Item(rule, dot_position=0, start_position=position), weight = rule.weight, back_pointer=None)
             self.cols[position].push(new_item)
             log.debug(f"\tPredicted: {new_item} in column {position}")
             self.profile["PREDICT"] += 1
 
-    def _scan(self, item: Item, position: int) -> None:
+    def _scan(self, entry: TableEntry, position: int) -> None:
         """Attach the next word to this item that ends at position, 
         if it matches what this item is looking for next."""
-        if position < len(self.tokens) and self.tokens[position] == item.next_symbol():
-            next_terminal = self.tokens[position]
-            for rule in self.grammar.expansions():
-                if rule.rhs#need to figure out a way to get the weight of a terminal
-            new_item = item.with_dot_advanced(self.tokens[position].weight) #to fix this
+        if position < len(self.tokens) and self.tokens[position] == entry.next_symbol():
+            new_item = entry.with_dot_advanced(0, entry)
             self.cols[position + 1].push(new_item)
             log.debug(f"\tScanned to get: {new_item} in column {position+1}")
             self.profile["SCAN"] += 1
 
-    def _attach(self, item: Item, position: int) -> None:
+    def _attach(self, entry: TableEntry, position: int) -> None:
         """Attach this complete item to its customers in previous columns, advancing the
         customers' dots to create new items in this column.  (This operation is sometimes
         called "complete," but actually it attaches an item that was already complete.)
         """
-        mid = item.start_position   # start position of this item = end position of item to its left
+        mid = entry.start_position   # start position of this item = end position of item to its left
         for customer in self.cols[mid].all():  # could you eliminate this inefficient linear search?
-            if customer.next_symbol() == item.rule.lhs:
-                new_item = customer.with_dot_advanced(item.weight)#this is a weight added to the current dot
+            if customer.next_symbol() == entry.rule.lhs:
+                new_item = customer.with_dot_advanced(entry.weight, new_back_pointer=entry)
                 self.cols[position].push(new_item)
                 log.debug(f"\tAttached to get: {new_item} in column {position}")
                 self.profile["ATTACH"] += 1
@@ -175,31 +207,16 @@ class Agenda:
     However, other implementations are possible -- and could be useful
     when dealing with weights, backpointers, and optimizations.
 
-    >>> a = Agenda()
-    >>> a.push(3)
-    >>> a.push(5)
-    >>> a.push(3)   # duplicate ignored
-    >>> a
-    Agenda([]; [3, 5])
-    >>> a.pop()
-    3
-    >>> a
-    Agenda([3]; [5])
-    >>> a.push(3)   # duplicate ignored
-    >>> a.push(7)
-    >>> a
-    Agenda([3]; [5, 7])
-    >>> while a:    # that is, while len(a) != 0
-    ...    print(a.pop())
-    5
-    7
+    The doctest has been removed because the implementation of the agenda requires a specific attribute from the key
 
+    
     """
 
     def __init__(self) -> None:
-        self._items: List[(int, Item)] = []       # list of all items that were *ever* pushed
-        self._pushed_items: List[Item] = []       
-        heapq.heapify(self._items)
+        self._items: List[TableEntry] = []       # list of all items that were *ever* pushed
+        self._index: Dict[str, int] = {}  # stores index of an item if it was ever pushed
+        self._next = 0                     # index of first item that has not yet been popped
+
 
         # Note: There are other possible designs.  For example, self._index doesn't really
         # have to store the index; it could be changed from a dictionary to a set.  
@@ -211,30 +228,39 @@ class Agenda:
     def __len__(self) -> int:
         """Returns number of items that are still waiting to be popped.
         Enables `len(my_agenda)`."""
-        return len(self._items)
+        return len(self._items) - self._next
 
-    def push(self, item: Item) -> None:
+    def push(self, entry: TableEntry) -> None:
         """Add (enqueue) the item, unless it was previously added."""
-        if item not in self._pushed_items:    # O(1) lookup in hash table
-            heapq.heappush(self._items, (item.weight, item))
-            self._pushed_items.append(self._items)
+        if entry.identifier not in self._index.keys():    # O(1) lookup in hash table
             
-    def pop(self) -> Item:
+            self._items.append(entry)
+            self._index[entry.identifier] = len(self._items) - 1
+        else:
+            index = self._index[entry.identifier]
+            current_entry = self._items[index]
+            if entry.weight < current_entry.weight:
+                self._items[index] = entry
+
+            
+    def pop(self) -> TableEntry:
         """Returns one of the items that was waiting to be popped (dequeued).
         Raises IndexError if there are no items waiting."""
         if len(self)==0:
             raise IndexError
-        item = heapq.heappop(self._items)
-        return item
+        entry = self._items[self._next]
+        self._next += 1
+        return entry
 
-    def all(self) -> Iterable[Item]:
+    def all(self) -> Iterable[TableEntry]:
         """Collection of all items that have ever been pushed, even if 
         they've already been popped."""
         return self._items
 
     def __repr__(self):
         """Provide a human-readable string REPResentation of this Agenda."""
-        return f"{self.__class__.__name__}({self._items}; {self._pushed_items})"
+        next = self._next
+        return f"{self.__class__.__name__}({self._items[:next]}; {self._items[next:]})"
 
 class Grammar:
     """Represents a weighted context-free grammar."""
@@ -298,12 +324,43 @@ class Rule:
     """
     lhs: str
     rhs: Tuple[str, ...]
-    weight: float = 0.0 #need to get the weight of a rule, should be simple
+    weight: float = 0.0
 
     def __repr__(self) -> str:
         """Complete string used to show this rule instance at the command line"""
         # Note: You might want to modify this to include the weight.
-        return f"{self.weight} {self.lhs} → {' '.join(self.rhs)}"
+        return f"{self.lhs} → {' '.join(self.rhs)}"
+
+#this class contains an entry in the table. It has an item plus weights
+class TableEntry:
+    item: Item
+    weight: float
+    back_pointer: TableEntry
+    rule: Rule
+    dot_position: int
+    start_position: int
+    identifier: str
+
+
+    def __init__(self, item, weight, back_pointer):
+        self.item = item
+        self.weight = weight
+        self.back_pointer = back_pointer
+        self.rule = self.item.rule
+        self.dot_position = self.item.dot_position
+        self.start_position = self.item.start_position
+        self.identifier = self.item.__repr__()
+
+    def next_symbol(self) -> Optional[str]:
+        return self.item.next_symbol()
+    
+    def with_dot_advanced(self, added_weight, new_back_pointer) -> TableEntry:
+        return TableEntry(item = self.item.with_dot_advanced(),weight = self.weight + added_weight, back_pointer=new_back_pointer)
+    
+    def __repr__(self) -> str:
+        return self.item.__repr__()
+    
+
 
     
 # We particularly want items to be immutable, since they will be hashed and 
@@ -315,18 +372,9 @@ class Item:
     rule: Rule
     dot_position: int
     start_position: int
-    weight: float #this is the weight of the item as an entry in the early chart
     # We don't store the end_position, which corresponds to the column
     # that the item is in, although you could store it redundantly for 
     # debugging purposes if you wanted.
-    identifier: str  #this is a string in the form of 
-
-    def __init__(self, rule, dot_position, start_position, weight):
-        self.rule = rule
-        self.dot_position = dot_position
-        self.start_position = start_position
-        self.weight = weight
-        self.identifier = self.__repr__()
 
     def next_symbol(self) -> Optional[str]:
         """What's the next, unprocessed symbol (terminal, non-terminal, or None) in this partially matched rule?"""
@@ -336,10 +384,10 @@ class Item:
         else:
             return self.rule.rhs[self.dot_position]
 
-    def with_dot_advanced(self, added_weight) -> Item:
+    def with_dot_advanced(self) -> Item:
         if self.next_symbol() is None:
             raise IndexError("Can't advance the dot past the end of the rule")
-        return Item(rule=self.rule, dot_position=self.dot_position + 1, start_position=self.start_position, weight=self.weight+added_weight)
+        return Item(rule=self.rule, dot_position=self.dot_position + 1, start_position=self.start_position)
 
     def __repr__(self) -> str:
         """Human-readable representation string used when printing this item."""
@@ -366,10 +414,13 @@ def main():
                 log.debug("="*70)
                 log.debug(f"Parsing sentence: {sentence}")
                 chart = EarleyChart(sentence.split(), grammar, progress=args.progress)
+                #print(chart)
                 # print the result
-                print(
-                    f"'{sentence}' is {'accepted' if chart.accepted() else 'rejected'} by {args.grammar}"
-                )
+                if chart.accepted():
+                    print(chart.get_parse())
+                    print(chart.get_weight())
+                else:
+                    print("NONE")
                 log.debug(f"Profile of work done: {chart.profile}")
 
 
