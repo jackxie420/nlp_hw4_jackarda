@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections import Counter
 from typing import Counter as CounterType, Iterable, List, Optional, Dict, Tuple
-import os
 
 log = logging.getLogger(Path(__file__).stem)  # For usage, see findsim.py in earlier assignment.
 
@@ -112,29 +111,37 @@ class EarleyChart:
     
     def get_parse(self) -> str:
         entry = self.best_entry
-        return self.tree_parse(entry, "")
+        return self.tree_parse(entry, 0, len(entry.back_pointers) == 1)
         
 
-    def tree_parse(self, node: TableEntry, line_gap: str) -> str:
+    def tree_parse(self, node: TableEntry, len_line: int, is_last: bool) -> str:
+        next = node.next_symbol()
         parse = ""
-        parse += "(" + str(node.rule.lhs) + " "
-        new_gap = line_gap + "".join([" "*len(parse)])
-        if node.back_pointers == []:
-            return node.next_symbol()
-        parse += self.tree_parse(node.back_pointers[0], new_gap)
+        len_parse = 0
+        if next != None and not self.grammar.is_nonterminal(next):
+            if not is_last:
+                parse += "\n"
+                for i in range(len_line):
+                    parse += " "
+                parse += str(next)
+                nextnext = node.next_next_symbol()
+                if not(nextnext != None and not self.grammar.is_nonterminal(nextnext)):
+                    parse += "\n"
+                for i in range(len_line):
+                    parse += " "
+            else:
+                parse += str(next)
+            return parse
+        if next == None:
+            parse += "(" + str(node.rule.lhs) + " "
+            len_parse = len(parse)
         for i in range(len(node.back_pointers)-1):
-                son = node.back_pointers[i+1]
-                son_next = son.next_symbol()
-                if son.next_symbol() == None:
-                    parse += "\n" + new_gap
-                    parse += self.tree_parse(son, new_gap)
-                elif not self.grammar.is_nonterminal(son_next):
-                    parse += "\n" + new_gap
-                    parse += str(son_next)
-        parse += ")"
+            son = node.back_pointers[i]
+            parse += self.tree_parse(son, len_line+len_parse, False)
+        parse += self.tree_parse(node.back_pointers[-1], len_line+len_parse, True)
+        if node.next_symbol() == None:
+            parse += ")"
         return parse
-
-
          
 
     def _run_earley(self) -> None:
@@ -444,9 +451,8 @@ def main():
                 log.debug(f"Parsing sentence: {sentence}")
                 chart = EarleyChart(sentence.split(), grammar, progress=args.progress)
                 if chart.accepted():
-                    results = str(chart.get_weight())
-                    results += "\n" + chart.get_parse()
-                    print(results)
+                    print(chart.get_parse())
+                    print(chart.get_weight())
                 else:
                     print("NONE")
                 log.debug(f"Profile of work done: {chart.profile}")
